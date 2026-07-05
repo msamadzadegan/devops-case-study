@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLUSTER_NAME="devops-cs"
 REGISTRY="ghcr.io/voize-gmbh/devops-case-study"
 LOCAL_IMAGES=false
+NAMESPACE_LIST=("postgres" "ml-api" "backend-api")
 
 echo "=== DevOps Case Study - Cluster Bootstrap ==="
 
@@ -102,6 +103,16 @@ flux bootstrap github \
 
 # --- Wait for workloads ---
 echo ""
+
+echo "Waiting for all target namespaces to be created..."
+for ns in "${NAMESPACE_LIST[@]}"; do
+  until kubectl get namespace "$ns" &>/dev/null; do
+    echo "Waiting for namespace '$ns' ..."
+    sleep 5
+  done
+  kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/"$ns" --timeout=60s
+done
+
 echo "--- Waiting for workloads to be deployed ---"
 kubectl wait --for=condition=Available deployment/postgres -n postgres --timeout=180s
 kubectl wait --for=condition=Available deployment/ml-api -n ml-api --timeout=180s

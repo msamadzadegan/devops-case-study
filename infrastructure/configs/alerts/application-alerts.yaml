@@ -1,0 +1,183 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: application-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # ---------------------------------------------------------------------
+    # Availability: is the service even reachable for Prometheus to scrape?
+    # ---------------------------------------------------------------------
+    - name: availability
+      rules:
+        - alert: ServiceTargetDown
+          expr: up{job=~"ml-api|backend-api"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+            description: >
+              Prometheus has not been able to scrape {{ $labels.job }}
+              ({{ $labels.instance }}) for 2 minutes. The pod may have
+              crashed, be stuck starting, or be network-partitioned.
+
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace=~"ml-api|backend-api"}[15m]) > 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
+            description: >
+              Container {{ $labels.container }} in pod {{ $labels.pod }}
+              has restarted more than 3 times in the last 15 minutes.
+
+        - alert: InsufficientReplicas
+          expr: |
+            kube_deployment_status_replicas_available{namespace=~"ml-api|backend-api"}
+              < kube_deployment_spec_replicas{namespace=~"ml-api|backend-api"}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.deployment }} is under-replicated"
+            description: >
+              Deployment {{ $labels.deployment }} has fewer available
+              replicas than desired for 5 minutes. We are running with
+              reduced capacity / no redundancy.
+
+    # ---------------------------------------------------------------------
+    # Errors: are requests failing?
+    # ---------------------------------------------------------------------
+    - name: errors
+      rules:
+        - alert: MLApiHighErrorRate
+          expr: |
+            (
+              sum(rate(ml_api_requests_total{status=~"5.."}[5m]))
+              /
+              sum(rate(ml_api_requests_total[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ML API 5xx error rate above 5%"
+            description: >
+              ML API has returned 5xx responses for more than 5% of
+              requests over the last 5 minutes (current value: {{ $value | humanizePercentage }}).
+
+        - alert: BackendApiHighErrorRate
+          expr: |
+            (
+              sum(rate(backend_api_requests_total{status=~"5.."}[5m]))
+              /
+              sum(rate(backend_api_requests_total[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Backend API 5xx error rate above 5%"
+            description: >
+              Backend API has returned 5xx responses for more than 5% of
+              requests over the last 5 minutes (current value: {{ $value | humanizePercentage }}).
+
+        - alert: BackendApiDbQueryErrors
+          expr: |
+            sum(rate(backend_api_db_queries_total{status="error"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend API is seeing database query errors"
+            description: >
+              Backend API has recorded failing DB queries for the last
+              5 minutes. Check PostgreSQL health and connection pool state.
+
+    # ---------------------------------------------------------------------
+    # Latency: are requests slow?
+    # ---------------------------------------------------------------------
+    - name: latency
+      rules:
+        - alert: MLApiHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(ml_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
+            ) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ML API p95 latency above 2s on {{ $labels.endpoint }}"
+            description: >
+              95th percentile latency for {{ $labels.endpoint }} has been
+              above 2 seconds for 5 minutes (current value: {{ $value | humanizeDuration }}).
+              Inference is the most latency-sensitive path in this system.
+
+        - alert: BackendApiHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(backend_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
+            ) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend API p95 latency above 1s on {{ $labels.endpoint }}"
+            description: >
+              95th percentile latency for {{ $labels.endpoint }} has been
+              above 1 second for 5 minutes (current value: {{ $value | humanizeDuration }}).
+
+    # ---------------------------------------------------------------------
+    # Saturation: are we running out of headroom?
+    # ---------------------------------------------------------------------
+    - name: saturation
+      rules:
+        - alert: BackendApiDbConnectionsNearLimit
+          # Adjust 20 to the actual configured pool size for backend-api.
+          expr: backend_api_db_connections_active > 16
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend API DB connection pool is nearly exhausted"
+            description: >
+              backend_api_db_connections_active has been above 16
+              (80% of an assumed pool size of 20) for 5 minutes. Requests
+              may soon start queuing or failing to acquire a connection.
+
+        - alert: MLApiMemoryGrowth
+          expr: |
+            deriv(ml_api_memory_bytes[30m]) > 0
+            and
+            ml_api_memory_bytes > 1.5e9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ML API memory usage is high and trending upward"
+            description: >
+              ml_api_memory_bytes has been above 1.5GiB and steadily
+              increasing for 15 minutes on {{ $labels.instance }} -
+              possible memory leak ahead of an OOMKill.
+
+        - alert: MLApiNoPredictionsWhileReceivingTraffic
+          expr: |
+            sum(rate(ml_api_requests_total[10m])) > 0
+            and
+            sum(rate(ml_api_predictions_total[10m])) == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ML API is receiving requests but producing no predictions"
+            description: >
+              ML API has received traffic for 10 minutes but
+              ml_api_predictions_total has not increased. The inference
+              path is likely broken even though the service still
+              responds to HTTP requests.
