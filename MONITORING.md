@@ -13,6 +13,7 @@
 2. I had to increase memory limits for ML-API and Backend-API as I faced with error code 137 for both. It might be related to the above point.
 3. To save time, I used Gemini/Claude to polish the documentation, review the alert rules, and improve the dashboards layout.
 4. Due to lack of hardware resource, Log management solution has not been tested.
+5. Selected threshold are just for case study otherwise they need to be adjusted precisely.
    
 ## 1. Stack Overview
 
@@ -185,7 +186,7 @@ expr: histogram_quantile(0.95,
 for: 15m
 ```
 
-Same structure but threshold is 1 second because Backend API operations (document processing, DB writes) should complete much faster than ML inference. Slow performance here usually points to database lock contention or slow queries.
+Same structure but threshold is 1 second because Backend API operations (document processing, DB writes) should complete much faster than ML inference. Slow performance here could points to database lock contention or slow queries.
 
 ---
 
