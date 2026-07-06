@@ -11,7 +11,8 @@
 ## Notes
 1. I think all Voize's images have been created on ARM systems as I counldn't download images with "no match for platform in manifest" error. My laptop is windows based x64 and I use WSL on it. For this reason I had to enable qemu-user-static package on WSL level and also run multiarch/qemu-user-static container to be able to download images.
 2. I had to increase memory limits for ML-API and Backend-API as I faced with error code 137 for both. It might be related to the above point.
-3. To save time, I used Gemini/Claude to polish the documentation, review the alert rules, and improve the dashboard layout.
+3. To save time, I used Gemini/Claude to polish the documentation, review the alert rules, and improve the dashboards layout.
+4. Due to lack of hardware resource, Log management solution has not been tested.
    
 ## 1. Stack Overview
 
@@ -322,7 +323,7 @@ The Linux CFS CPU limiter works in fixed time slices called periods. `container_
 | `HighPodMemoryUsage-Warning` | warning | Container memory working set > 70% of limit | 15m |
 | `HighPodMemoryUsage-Critical` | critical | Container memory working set > 90% of limit | 10m |
 | `HighPodCPUUsage-warning` | warning | Container CPU usage > 70% of limit | 15m |
-| `HighPodCPUUsage-Critical` | warning | Container CPU usage > 90% of limit | 10m |
+| `HighPodCPUUsage-Critical` | critical | Container CPU usage > 90% of limit | 10m |
 | `HighPVCUsage` | critical | PVC >90% full AND <150 GiB free | 15m |
 | `ContainerCPUThrottlingHigh` | warning | CPU throttled periods > 20% of total | 15m |
 
@@ -330,7 +331,7 @@ The Linux CFS CPU limiter works in fixed time slices called periods. `container_
 
 ## 3. Dashboards
 
-Two dashboards are deployed as Grafana ConfigMaps with label `grafana_dashboard: "1"`, auto-loaded by the Grafana sidecar. Both use `graphTooltip: 2` — shared crosshair and tooltip across all panels — so hovering on one panel shows values on all others at the same timestamp, which is essential for correlating events across services.
+Two dashboards are deployed as Grafana ConfigMaps with label `grafana_dashboard: "1"`, auto-loaded by the Grafana sidecar.
 
 ---
 
@@ -443,17 +444,9 @@ Same percentile structure as ML API but with tighter thresholds — yellow at 0.
 
 ## 4. Tradeoffs and What I'd Do Differently
 
-**Alertmanager receiver is a no-op.** In production this would route critical alerts to PagerDuty (immediate on-call page) and warning alerts to a Slack channel (async review), with inhibition rules so a `ServiceTargetDown` suppresses downstream latency and error alerts for the same service. Left as a stub because there is no real on-call rotation for this cluster.
-
-**`HighPodCPUUsage-Critical` severity is mislabeled `warning`.** At 90% CPU utilization the service is already visibly degraded to users. This is a one-line fix in the PrometheusRule.
+**Alertmanager receiver is a no-op.** In production this would route alerts to Slack/PagerDuty/MS-Teams ....
 
 **No SLO-based burn-rate alerting.** The current rules are static threshold alerts. With more time I would define explicit SLOs — for example, 99.5% of inference requests complete in under 2 seconds over a 30-day rolling window — and use multi-window burn-rate alerts from the Google SRE workbook. Multi-window burn-rate alerts have far fewer false positives than static thresholds and provide graduated urgency: a fast burn (1-hour window) fires as critical, a slow burn (6-hour window) fires as warning.
-
-**No distributed tracing.** With three services on a shared request path, OpenTelemetry tracing (Tempo as backend) would close the remaining diagnostic gap by letting you follow a single slow request through all three services and pinpoint exactly which internal operation caused the latency. Metrics and dashboards alone cannot do this.
-
-**Prometheus retention is short and storage is ephemeral.** Configured at 6 hours for this local k3d cluster. Production needs a PVC and longer retention, or remote-write to Thanos/Mimir for long-term storage and cross-cluster aggregation.
-
-**Loki/Alloy has no structured log parsing.** If the services emit JSON-structured logs, Alloy River pipeline stages could extract fields like `request_id`, `trace_id`, `level`, and `duration` as indexed labels, enabling much more targeted log queries during triage. Currently logs are shipped as raw text.
 
 ---
 
