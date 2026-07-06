@@ -238,7 +238,7 @@ spec:
             ) > 0.90
           for: 10m
           labels:
-            severity: warning
+            severity: critical
           annotations:
             summary: "High CPU Usage on Container {{ $labels.container }}"
             description: "Container '{{ $labels.container }}' in pod '{{ $labels.namespace }}/{{ $labels.pod }}' is consuming {{ $value | humanizePercentage }} of its throttled CPU limit for over 10 minutes."
