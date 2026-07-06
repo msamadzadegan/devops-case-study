@@ -801,7 +801,7 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum(rate(ml_api_requests_total[5m]))",
+              "expr": "sum(rate(ml_api_requests_total{endpoint!~"/healthz|/metrics"}[5m]))",
               "legendFormat": "HTTP Requests/s",
               "refId": "A"
             },

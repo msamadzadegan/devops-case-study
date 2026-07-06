@@ -14,7 +14,7 @@ spec:
       rules:
         - alert: ServiceTargetDown
           expr: up{job=~"ml-api|backend-api"} == 0
-          for: 2m
+          for: 5m
           labels:
             severity: critical
           annotations:
@@ -24,31 +24,34 @@ spec:
               ({{ $labels.instance }}) for 2 minutes. The pod may have
               crashed, be stuck starting, or be network-partitioned.
 
-        - alert: PodCrashLooping
-          expr: |
-            increase(kube_pod_container_status_restarts_total{namespace=~"ml-api|backend-api"}[15m]) > 3
-          for: 5m
+        - alert: KubePodEnteredBadPhase
+          expr: sum(increase(kube_pod_status_phase{job="kube-state-metrics", phase!~"Running|Succeeded|Pending"}[2h])) by (namespace, pod, phase) > 2
+          for: 15m
           labels:
             severity: critical
           annotations:
-            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
-            description: >
-              Container {{ $labels.container }} in pod {{ $labels.pod }}
-              has restarted more than 3 times in the last 15 minutes.
+            summary: "Pod '{{ $labels.pod }}' in namespace '{{ $labels.namespace }}' entered phase '{{ $labels.phase }}'"
+            description: "The pod '{{ $labels.pod }}' in namespace '{{ $labels.namespace }}' has entered the '{{ $labels.phase }}' phase at least once in the last 15 mins."
+
+        - alert: KubePodCrashLoopBackOff
+          expr: count(kube_pod_container_status_waiting_reason{job="kube-state-metrics", reason="CrashLoopBackOff"} == 1) by (namespace, pod, container, reason) > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Container '{{ $labels.container }}' in pod '{{ $labels.pod }}' (ns: '{{ $labels.namespace }}') is in CrashLoopBackOff"
+            description: "The container '{{ $labels.container }}' within pod '{{ $labels.pod }}' in namespace '{{ $labels.namespace }}' is currently in a CrashLoopBackOff state (reason: '{{ $labels.reason }}')."
 
         - alert: InsufficientReplicas
           expr: |
             kube_deployment_status_replicas_available{namespace=~"ml-api|backend-api"}
               < kube_deployment_spec_replicas{namespace=~"ml-api|backend-api"}
-          for: 5m
+          for: 15m
           labels:
             severity: warning
           annotations:
             summary: "{{ $labels.namespace }}/{{ $labels.deployment }} is under-replicated"
-            description: >
-              Deployment {{ $labels.deployment }} has fewer available
-              replicas than desired for 5 minutes. We are running with
-              reduced capacity / no redundancy.
+            description: Deployment {{ $labels.deployment }} has fewer available replicas than desired for 15 minutes.
 
     # ---------------------------------------------------------------------
     # Errors: are requests failing?
@@ -87,85 +90,6 @@ spec:
               Backend API has returned 5xx responses for more than 5% of
               requests over the last 5 minutes (current value: {{ $value | humanizePercentage }}).
 
-        - alert: BackendApiDbQueryErrors
-          expr: |
-            sum(rate(backend_api_db_queries_total{status="error"}[5m])) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Backend API is seeing database query errors"
-            description: >
-              Backend API has recorded failing DB queries for the last
-              5 minutes. Check PostgreSQL health and connection pool state.
-
-    # ---------------------------------------------------------------------
-    # Latency: are requests slow?
-    # ---------------------------------------------------------------------
-    - name: latency
-      rules:
-        - alert: MLApiHighLatency
-          expr: |
-            histogram_quantile(0.95,
-              sum(rate(ml_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
-            ) > 2
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "ML API p95 latency above 2s on {{ $labels.endpoint }}"
-            description: >
-              95th percentile latency for {{ $labels.endpoint }} has been
-              above 2 seconds for 5 minutes (current value: {{ $value | humanizeDuration }}).
-              Inference is the most latency-sensitive path in this system.
-
-        - alert: BackendApiHighLatency
-          expr: |
-            histogram_quantile(0.95,
-              sum(rate(backend_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
-            ) > 1
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Backend API p95 latency above 1s on {{ $labels.endpoint }}"
-            description: >
-              95th percentile latency for {{ $labels.endpoint }} has been
-              above 1 second for 5 minutes (current value: {{ $value | humanizeDuration }}).
-
-    # ---------------------------------------------------------------------
-    # Saturation: are we running out of headroom?
-    # ---------------------------------------------------------------------
-    - name: saturation
-      rules:
-        - alert: BackendApiDbConnectionsNearLimit
-          # Adjust 20 to the actual configured pool size for backend-api.
-          expr: backend_api_db_connections_active > 16
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Backend API DB connection pool is nearly exhausted"
-            description: >
-              backend_api_db_connections_active has been above 16
-              (80% of an assumed pool size of 20) for 5 minutes. Requests
-              may soon start queuing or failing to acquire a connection.
-
-        - alert: MLApiMemoryGrowth
-          expr: |
-            deriv(ml_api_memory_bytes[30m]) > 0
-            and
-            ml_api_memory_bytes > 1.5e9
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: "ML API memory usage is high and trending upward"
-            description: >
-              ml_api_memory_bytes has been above 1.5GiB and steadily
-              increasing for 15 minutes on {{ $labels.instance }} -
-              possible memory leak ahead of an OOMKill.
-
         - alert: MLApiNoPredictionsWhileReceivingTraffic
           expr: |
             sum(rate(ml_api_requests_total[10m])) > 0
@@ -181,3 +105,175 @@ spec:
               ml_api_predictions_total has not increased. The inference
               path is likely broken even though the service still
               responds to HTTP requests.
+
+        - alert: BackendApiDbQueryErrors
+          expr: |
+            (
+              sum(rate(backend_api_db_queries_total{status="error"}[5m]))
+              /
+              sum(rate(backend_api_db_queries_total[5m]))
+            ) > 0.02
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High Database Error Rate detected on Backend API"
+            description: >
+              "DB errors are currently accounting for {{ $value | humanizePercentage }} of total queries over the last 15 minutes."
+
+    # ---------------------------------------------------------------------
+    # Latency: are requests slow?
+    # ---------------------------------------------------------------------
+    - name: latency
+      rules:
+        - alert: MLApiHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(ml_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
+            ) > 2
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ML API p95 latency above 2s on {{ $labels.endpoint }}"
+            description: >
+              95th percentile latency for {{ $labels.endpoint }} has been
+              above 2 seconds for 15 minutes (current value: {{ $value | humanizeDuration }}).
+              Inference is the most latency-sensitive path in this system.
+
+        - alert: BackendApiHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(backend_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
+            ) > 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend API p95 latency above 1s on {{ $labels.endpoint }}"
+            description: >
+              95th percentile latency for {{ $labels.endpoint }} has been
+              above 1 second for 15 minutes (current value: {{ $value | humanizeDuration }}).
+
+    # ---------------------------------------------------------------------
+    # Saturation: are we running out of headroom?
+    # ---------------------------------------------------------------------
+    - name: saturation
+      rules:
+        - alert: BackendApiDbConnectionsNearLimit
+          # Considering there is backend_api_db_connections_max
+          expr: |
+            (
+              backend_api_db_connections_active 
+              / 
+              backend_api_db_connections_max
+            ) > 0.85
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Database connection pool near exhaustion"
+            description: "Backend API is utilizing {{ $value | humanizePercentage }} of its available database connection pool for over 15 minutes."
+
+        - alert: MLMemoryGrowth
+          expr: |
+            predict_linear(ml_api_memory_bytes[1h], 14400) > kube_pod_container_resource_limits_memory_bytes{container="ml-api"}
+            and 
+            (ml_api_memory_bytes / kube_pod_container_resource_limits_memory_bytes{container="ml-api"}) > 0.80
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Container {{ $labels.container }} on job {{ $labels.job }} predicted to run Out Of Memory"
+            description: "Based on the last 1 hour of consumption, the container '{{ $labels.container }}' is tracking at {{ $value | humanizePercentage }} utilization and is projected to exceed its limit and OOM-kill within the next 4 hours."
+
+        - alert: HighPodMemoryUsage-Warning
+          expr: |
+            (
+              container_memory_working_set_bytes{container!=""}
+              /
+              container_spec_memory_limit_bytes{container!=""}
+            ) > 0.70
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High Memory Usage on Container {{ $labels.container }}"
+            description: "Container '{{ $labels.container }}' in pod '{{ $labels.namespace }}/{{ $labels.pod }}' is utilizing {{ $value | humanizePercentage }} of its assigned memory limit for over 15 minutes."
+
+        - alert: HighPodMemoryUsage-Critical
+          expr: |
+            (
+              container_memory_working_set_bytes{container!=""}
+              /
+              container_spec_memory_limit_bytes{container!=""}
+            ) > 0.90
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High Memory Usage on Container {{ $labels.container }}"
+            description: "Container '{{ $labels.container }}' in pod '{{ $labels.namespace }}/{{ $labels.pod }}' is utilizing {{ $value | humanizePercentage }} of its assigned memory limit for over 10 minutes."
+
+        - alert: HighPodCPUUsage-warning
+          expr: |
+            (
+              sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (namespace, pod, container)
+              /
+              sum(container_spec_cpu_quota{container!=""} / container_spec_cpu_period{container!=""}) by (namespace, pod, container)
+            ) > 0.70
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High CPU Usage on Container {{ $labels.container }}"
+            description: "Container '{{ $labels.container }}' in pod '{{ $labels.namespace }}/{{ $labels.pod }}' is consuming {{ $value | humanizePercentage }} of its throttled CPU limit for over 15 minutes."
+
+        - alert: HighPodCPUUsage-Critical
+          expr: |
+            (
+              sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (namespace, pod, container)
+              /
+              sum(container_spec_cpu_quota{container!=""} / container_spec_cpu_period{container!=""}) by (namespace, pod, container)
+            ) > 0.90
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High CPU Usage on Container {{ $labels.container }}"
+            description: "Container '{{ $labels.container }}' in pod '{{ $labels.namespace }}/{{ $labels.pod }}' is consuming {{ $value | humanizePercentage }} of its throttled CPU limit for over 10 minutes."
+
+        - alert: HighPVCUsage
+          expr: (
+                  max by (persistentvolumeclaim, namespace) (
+                    100 - (kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes) * 100
+                  ) > 90
+                )
+                and
+                (
+                  max by (persistentvolumeclaim, namespace) (
+                    kubelet_volume_stats_available_bytes
+                  ) < 150 * 1024 * 1024 * 1024
+                )
+          for: 15m # Alert fires if the condition is true for 15 minutes
+          labels:
+            severity: critical
+          annotations:
+            summary: "PersistentVolumeClaim usage high (namespace: {{ $labels.namespace }}, pvc: {{ $labels.persistentvolumeclaim }})"
+            description: "The PersistentVolumeClaim '{{ $labels.persistentvolumeclaim }}' in namespace '{{ $labels.namespace }}' is over 90% full.\n  VALUE = {{ $value | printf \"%.2f\" }}%\n  LABELS = {{ $labels }}"
+
+        - alert: ContainerCPUThrottlingHigh
+          expr: |
+            (
+              sum(increase(container_cpu_cfs_throttled_periods_total{namespace=~"ml-api|backend-api", container!=""}[5m])) by (namespace, pod, container)
+              /
+              sum(increase(container_cpu_cfs_periods_total{namespace=~"ml-api|backend-api", container!=""}[5m])) by (namespace, pod, container)
+            ) > 0.20
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Container {{ $labels.container }} is experiencing heavy CPU throttling"
+            description: "The container '{{ $labels.container }}' in pod '{{ $labels.namespace }}/{{ $labels.pod }}' has spent {{ $value | humanizePercentage }} of its runtime throttled by the OS scheduler over the last 15 minutes. This causes massive API latency degradation."
+
+
